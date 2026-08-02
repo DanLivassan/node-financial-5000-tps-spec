@@ -51,6 +51,12 @@ export async function saveArtifact(kind, result, extra = {}) {
     node: process.version, platform: `${os.platform()} ${os.release()} ${os.arch()}`,
     cpus: os.cpus().map((cpu) => cpu.model), cpuCount: os.availableParallelism(), memoryBytes: os.totalmem(),
     dbPoolMax: Number.parseInt(process.env.DB_POOL_MAX ?? "20", 10), kafkaPartitions: 12,
+    transactionBatch: {
+      maxSize: Number.parseInt(process.env.TRANSACTION_BATCH_SIZE ?? "32", 10),
+      windowMs: Number.parseInt(process.env.TRANSACTION_BATCH_WINDOW_MS ?? "2", 10),
+      concurrency: Number.parseInt(process.env.TRANSACTION_BATCH_CONCURRENCY ?? "4", 10),
+      queueMax: Number.parseInt(process.env.TRANSACTION_BATCH_QUEUE_MAX ?? "5000", 10),
+    },
     payloadAmountMinor: Number.parseInt(process.env.LOAD_AMOUNT_MINOR ?? "1", 10),
     durability: { synchronousCommit: "on (not changed by benchmark)", fsync: "on (not changed by benchmark)", kafkaAcks: "all" },
   }, summary: summary(result), extra, raw: result };

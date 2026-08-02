@@ -17,7 +17,8 @@ Exactly-once end-to-end delivery is not claimed.
 ```mermaid
 flowchart LR
     Client --> API[Transaction API]
-    API -->|single DB transaction| PG[(PostgreSQL)]
+    API --> MB[Bounded microbatcher]
+    MB -->|one DB transaction per batch| PG[(PostgreSQL)]
     PG --> TX[financial_transactions]
     PG --> JE[journal_entries]
     PG --> LP[ledger_postings]
@@ -35,17 +36,29 @@ PostgreSQL é a fonte de verdade. A API nunca chama Kafka, Redis ou provedor ban
 
 ## Ciclo de uma transação financeira
 
-`POST /v1/transactions` valida um corpo limitado a 16 KiB e uma `Idempotency-Key`. Em uma transação curta do PostgreSQL:
+`POST /v1/transactions` valida um corpo limitado a 16 KiB e uma `Idempotency-Key`. A interface continua síncrona, mas a implementação coloca o comando em uma fila limitada e aguarda uma janela curta para formar um microbatch. Em uma transação curta do PostgreSQL, o lote:
 
-1. tenta reservar a chave idempotente única e persiste a resposta determinística;
-2. bloqueia as contas com `FOR SHARE` e as projeções de saldo com `FOR UPDATE`, por UUID;
-3. valida conta ativa, moeda e fundos;
-4. cria journal e dois postings balanceados;
-5. incrementa os saldos e suas versões;
-6. cria um evento outbox;
+1. consulta replays e tenta reservar, em bulk, cada chave idempotente única com sua resposta determinística;
+2. bloqueia todas as contas com `FOR SHARE` e as projeções de saldo com `FOR UPDATE`, por UUID globalmente ordenado;
+3. valida conta ativa, moeda e fundos na ordem de chegada dentro do lote para operações que compartilham conta;
+4. cria journals e postings balanceados com inserts bulk;
+5. agrega deltas por conta, incrementa os saldos e preserva a quantidade de versões;
+6. cria um evento outbox por operação aceita, também em bulk;
 7. confirma tudo junto.
 
-Qualquer erro desfaz todos os passos. A resposta `201` só ocorre após o commit.
+Erro de domínio é associado somente ao item correspondente e não contamina os válidos. Erro de infraestrutura, constraint diferida, deadlock ou falha no commit desfaz o lote inteiro; deadlock/serialização recebe retry bounded. A resposta de cada cliente é resolvida somente depois do commit, com o ID que foi persistido para seu comando.
+
+### Microbatch síncrono na interface
+
+O dispatcher usa lote máximo 32, janela de 2 ms e até quatro lotes concorrentes por padrão. Lote cheio é despachado imediatamente; lote parcial espera apenas a janela. A fila inclui itens aguardando e executando, tem limite de 5.000 e retorna `503 BATCH_QUEUE_FULL` antes de aceitar mais trabalho. No shutdown ela para novos comandos e drena os já recebidos.
+
+A fila em memória não é um aceite durável: antes do commit a conexão HTTP continua aberta. Se o processo cair, o cliente observa desconexão/timeout e repete a mesma chave. Se o commit ocorreu mas a resposta se perdeu, o replay lê a resposta persistida. Assim o endpoint não finge `5.000 posted TPS` medindo apenas enqueue e não muda para `202 Accepted` por baixo do contrato.
+
+Requisições simultâneas com a mesma chave e hash dentro do processo compartilham a Promise do vencedor; cada seguidora recebe o mesmo corpo com `Idempotency-Replayed: true`. Hash diferente enquanto a chave está em voo recebe `409`. A constraint PostgreSQL continua sendo a autoridade entre processos e réplicas.
+
+O ganho vem de reduzir `BEGIN`/`COMMIT`, aquisições de conexão e round trips, não de retirar durabilidade. PostgreSQL já faz group commit, portanto tamanho maior não implica ganho linear. Lotes ampliam duração dos locks e raio do retry; tamanho, janela e concorrência devem ser medidos em carga uniforme e hot, nunca escolhidos apenas pelo maior TPS médio.
+
+Há ordenação determinística de locks e serialização financeira, mas não FIFO global por conta entre lotes concorrentes: a ordem efetiva entre eles é a ordem de aquisição do lock no PostgreSQL. Se o negócio exigir ordem estrita de chegada por conta, será necessário um scheduler particionado por chave, com tratamento explícito para transferências que tocam duas contas.
 
 Request:
 
@@ -195,6 +208,10 @@ Em terminais separados, execute relay e consumer pelos comandos acima. `db:seed`
 | `KAFKA_BROKERS` | `localhost:9092` | brokers separados por vírgula |
 | `PORT` | `3000` | API |
 | `DB_POOL_MAX` | `20` | pool por processo |
+| `TRANSACTION_BATCH_SIZE` | `32` | comandos financeiros máximos por commit |
+| `TRANSACTION_BATCH_WINDOW_MS` | `2` | espera máxima para formar lote parcial |
+| `TRANSACTION_BATCH_CONCURRENCY` | `4` | lotes executando por processo |
+| `TRANSACTION_BATCH_QUEUE_MAX` | `5000` | comandos aguardando ou executando antes de `503` |
 | `LOG_LEVEL` | `info` | Pino |
 | `RELAY_BATCH_SIZE` | `500` | claim por ciclo |
 | `RELAY_POLL_MS` | `250` | polling sem trabalho |
@@ -215,7 +232,7 @@ pnpm test:integration
 pnpm test:all
 ```
 
-Integração exige PostgreSQL migrado; o teste Kafka exige o broker local real. Concorrência, locking e delivery não usam mocks. A suíte cobre rollback total, 120 duplicatas concorrentes, conflito de hash, conta quente, rebuild, import/rerun, reversão, relays concorrentes, consumer duplicado e publicação/consumo Kafka reais.
+Integração exige PostgreSQL migrado; o teste Kafka exige o broker local real. Concorrência, locking e delivery não usam mocks. A suíte cobre rollback total do lote, erro individual isolado, associação cliente/resposta, backpressure, 120 duplicatas concorrentes, disputa entre lotes, conflito de hash, conta quente, rebuild, import/rerun, reversão, relays concorrentes, consumer duplicado e publicação/consumo Kafka reais.
 
 ## Autocannon por 10 segundos
 
@@ -244,7 +261,7 @@ pnpm load:balance-contention    # 1.000 contas: uniforme, Zipf, hot e mistura 80
 pnpm load:report                # resume todos os JSON persistidos
 ```
 
-O teste de idempotência prova uma transação, um journal, dois postings, um outbox, mesmo ID de resposta e `409` com outro valor. O de contenção cria 500 pares independentes (1.000 contas), financia cada origem pela API e executa, por padrão, três runs de 10 s em quatro cenários: uniforme, Zipf α=1,1, uma conta quente e 80% uniforme/20% hot. Ele registra seed, média/desvio padrão de TPS, p50/p95/p99, retries, deadlocks e auditoria final; falha se houver erro HTTP, deadlock ou discrepância ledger/projeção.
+O teste de idempotência prova uma transação, um journal, dois postings, um outbox, mesmo ID de resposta e `409` com outro valor. O de contenção cria 500 pares independentes (1.000 contas), financia cada origem pela API e executa, por padrão, três runs de 10 s em quatro cenários: uniforme, Zipf α=1,1, uma conta quente e 80% uniforme/20% hot. Ele registra seed, configuração e estatísticas do microbatch, média/desvio padrão de TPS, p50/p95/p99, retries, deadlocks e auditoria final; falha se houver erro HTTP, deadlock ou discrepância ledger/projeção.
 
 ```bash
 CONTENTION_ACCOUNT_COUNT=1000 CONTENTION_RUNS=3 CONTENTION_DURATION=10 \
@@ -267,7 +284,7 @@ O script imprime host/database, contagens e duração; remove em ordem de depend
 
 ## Observabilidade
 
-`/metrics` da API expõe métricas Prometheus de HTTP, transações, replay/conflito, ledger, retries, discrepâncias, backlog/idade do outbox, publicação, reconciliação, Kafka, duplicatas do consumidor, pool e métricas padrão Node.js de event loop. Logs estruturados redigem `Authorization` e `Idempotency-Key`.
+`/metrics` da API expõe métricas Prometheus de HTTP, transações, replay/conflito, ledger, retries, discrepâncias, backlog/idade do outbox, publicação, reconciliação, Kafka, duplicatas do consumidor, pool e métricas padrão Node.js de event loop. O microbatch expõe histogramas de tamanho, espera na fila e duração, gauges de fila/lotes ativos e contador de backpressure. Logs estruturados redigem `Authorization` e `Idempotency-Key`.
 
 Além da aplicação, monitore `pg_stat_activity`, espera de locks, deadlocks, slow queries, pool, WAL bytes, checkpoints, autovacuum, `fsync` e latência do volume. Alertas devem usar idade do outbox e lag Kafka, não apenas taxa média.
 
@@ -279,7 +296,7 @@ Fastify usa validação pré-compilável, payload limitado e middleware mínimo.
 
 ### PostgreSQL
 
-O commit financeiro é curto, SQL parametrizado e tabelas quentes têm poucos índices. Saldos são bloqueados determinísticamente; a conta quente serializa naturalmente e pode dominar p99 mesmo quando TPS distribuído é alto. Meça antes de particionar. PgBouncer ajuda excesso de conexões, não contenção de uma mesma linha. SSD/NVMe, WAL, checkpoints e autovacuum importam. Nunca desligue `fsync` ou `synchronous_commit` para alcançar o número.
+O microbatch reduz commits e usa DML bulk, mas cada operação ainda grava transação, journal, dois postings, dois efeitos de saldo e outbox. Saldos são bloqueados determinísticamente; a conta quente serializa naturalmente e pode dominar p99 mesmo quando TPS distribuído é alto. Meça matriz de tamanho/janela/concorrência antes de particionar. PgBouncer ajuda excesso de conexões, não contenção de uma mesma linha. SSD/NVMe, WAL, checkpoints, triggers diferidas e autovacuum importam. Nunca desligue `fsync` ou `synchronous_commit` para alcançar o número.
 
 ### Ledger e saldos
 
@@ -323,6 +340,23 @@ Em 2026-08-02, o teste ampliado criou 500 pares independentes — 1.000 contas �
 O PostgreSQL registrou zero deadlocks; a aplicação registrou zero retries; a auditoria final encontrou zero discrepâncias entre ledger e projeções. Artefato bruto com todos os 12 runs: `artifacts/load-tests/account-distribution-1000-2026-08-02T12-08-52.074Z.json`.
 
 As 1.000 contas melhoraram o paralelismo em relação à conta totalmente quente, mas não produziram 5.000 TPS. Zipf ficou próximo da média uniforme, porém com variância e p99 maiores; apenas 20% de tráfego hot já elevou fortemente p95/p99. Neste ambiente, além dos locks, WAL/fsync, custo do commit, pool e CPU precisam ser medidos para explicar o teto distribuído.
+
+### Resultado após microbatch
+
+Em 2026-08-02, após trocar o hot path HTTP por microbatch com tamanho máximo 32, janela 2 ms, concorrência 4 e o mesmo pool 20, a mesma matriz de 1.000 contas produziu:
+
+| Distribuição | TPS médio | Ganho sobre baseline | Desvio TPS | p50 médio | p95 médio | p99 médio | erros/non-2xx |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Uniforme | 1.920,93 | 4,33× | 80,79 | 100,67 ms | 152,86 ms | 206,00 ms | 0/0 |
+| Zipf α=1,1 | 952,87 | 2,13× | 42,22 | 197,00 ms | 339,01 ms | 413,33 ms | 0/0 |
+| 80% uniforme / 20% hot | 965,11 | 2,24× | 45,28 | 194,33 ms | 296,61 ms | 352,00 ms | 0/0 |
+| 100% hot | 929,00 | 4,90× | 105,87 | 205,67 ms | 310,05 ms | 386,67 ms | 0/0 |
+
+Nos 12 runs, 147.219 comandos foram processados em 4.621 lotes: tamanho médio 31,86, duração média 105,99 ms, espera média 55,12 ms, zero rejeições, deadlocks, retries ou divergências. Artefato: `artifacts/load-tests/account-distribution-1000-2026-08-02T14-22-04.243Z.json`.
+
+O teste padrão de uma única dupla de contas chegou a 906,7 TPS, p50 215 ms, p95 300,733 ms e p99 331 ms, sem erros. Artefato: `artifacts/load-tests/autocannon-10s-2026-08-02T14-22-48.335Z.json`. O teste idempotente concorrente enviou 120 requests e provou uma transação, um journal, dois postings, um outbox, um único ID e conflito `409` para payload diferente.
+
+O ganho é mensurado, mas **a implementação ainda não demonstrou 5.000 TPS**: o melhor cenário ficou 2,60× abaixo da meta. A queda de uniforme para Zipf/mixed mostra que lotes grandes não removem dependências por conta; próximos experimentos devem decompor duração do batch em triggers, WAL/commit e DML, e testar tamanho/janela/concorrência com p99 e fairness como restrições.
 
 Esses números **não demonstram 5.000 TPS** e não são capacidade produtiva. São uma linha de base reproduzível de uma única execução local. Os dois primeiros artefatos de Autocannon preservam execuções inválidas, marcadas pelo `load:report` como `INVALID`, que detectaram o body dinâmico mal configurado; eles não são resultados de throughput financeiro.
 

@@ -66,12 +66,18 @@ function zipfIndex(random) {
 
 async function readOperationalCounters() {
   const database = await pool.query("SELECT deadlocks::bigint FROM pg_stat_database WHERE datname=current_database()");
-  let retries = 0;
+  const application = { retries: 0, batchSizeCount: 0, batchSizeSum: 0, batchDurationSum: 0, queueWaitSum: 0, rejected: 0 };
   try {
     const text = await (await fetch(`${targetUrl}/metrics`)).text();
-    for (const match of text.matchAll(/^balance_update_retries_total(?:\{[^}]*\})?\s+([\d.e+-]+)$/gm)) retries += Number(match[1]);
+    for (const match of text.matchAll(/^balance_update_retries_total(?:\{[^}]*\})?\s+([\d.e+-]+)$/gm)) application.retries += Number(match[1]);
+    const metric = (name) => Number(text.match(new RegExp(`^${name}\\s+([\\d.e+-]+)$`, "m"))?.[1] ?? 0);
+    application.batchSizeCount = metric("transaction_batch_size_count");
+    application.batchSizeSum = metric("transaction_batch_size_sum");
+    application.batchDurationSum = metric("transaction_batch_duration_seconds_sum");
+    application.queueWaitSum = metric("transaction_batch_queue_wait_seconds_sum");
+    application.rejected = metric("transaction_batch_rejected_total");
   } catch { /* workload will expose API unavailability separately */ }
-  return { deadlocks: BigInt(database.rows[0]?.deadlocks ?? 0), retries };
+  return { deadlocks: BigInt(database.rows[0]?.deadlocks ?? 0), ...application };
 }
 
 async function executeRun(scenario, runIndex, choosePair) {
@@ -115,10 +121,20 @@ function aggregate(results) {
 }
 const scenarios = Object.fromEntries(Object.entries(rawRuns).map(([name, results]) => [name, aggregate(results)]));
 const counterDeltas = { deadlocks: Number(countersAfter.deadlocks - countersBefore.deadlocks), retries: countersAfter.retries - countersBefore.retries };
+const batchCount = countersAfter.batchSizeCount - countersBefore.batchSizeCount;
+const batchCommands = countersAfter.batchSizeSum - countersBefore.batchSizeSum;
+const batchMetrics = {
+  batches: batchCount,
+  commands: batchCommands,
+  averageBatchSize: batchCount > 0 ? batchCommands / batchCount : 0,
+  averageBatchDurationMs: batchCount > 0 ? (countersAfter.batchDurationSum - countersBefore.batchDurationSum) * 1000 / batchCount : 0,
+  averageQueueWaitMs: batchCommands > 0 ? (countersAfter.queueWaitSum - countersBefore.queueWaitSum) * 1000 / batchCommands : 0,
+  rejected: countersAfter.rejected - countersBefore.rejected,
+};
 const extra = { accountCount, pairCount, durationSecondsPerRun: duration, connections, seed, zipfAlpha, fundingMinor,
   distribution: { uniform: "round-robin over 500 independent pairs", zipf: `Zipf alpha=${zipfAlpha}`,
     hot: "100% on one pair", mixed80_20: "80% round-robin, 20% on one hot pair" },
-  scenarios, counterDeltas, balanceDiscrepancies: discrepancy.rows[0].count, rawRuns };
+  scenarios, counterDeltas, batchMetrics, balanceDiscrepancies: discrepancy.rows[0].count, rawRuns };
 await pool.end();
 
 console.table(Object.fromEntries(Object.entries(scenarios).map(([name, result]) => [name, {
@@ -126,7 +142,7 @@ console.table(Object.fromEntries(Object.entries(scenarios).map(([name, result]) 
   p50Ms: result.p50MsMean.toFixed(2), p95Ms: result.p95MsMean.toFixed(2), p99Ms: result.p99MsMean.toFixed(2),
   errors: result.errors, non2xx: result.non2xx,
 }])));
-console.log({ counterDeltas, balanceDiscrepancies: discrepancy.rows[0].count });
+console.log({ counterDeltas, batchMetrics, balanceDiscrepancies: discrepancy.rows[0].count });
 await saveArtifact("account-distribution-1000", rawRuns.uniform[0], extra);
 if (Object.values(scenarios).some((scenario) => scenario.errors || scenario.non2xx) ||
     counterDeltas.deadlocks > 0 || discrepancy.rows[0].count > 0) process.exitCode = 1;
