@@ -1,0 +1,148 @@
+{
+  "kind": "balance-contention",
+  "recordedAt": "2026-08-02T11:52:49.975Z",
+  "environment": {
+    "node": "v24.13.1",
+    "platform": "linux 7.0.0-28-generic x64",
+    "cpus": [
+      "Intel(R) Core(TM) i7-2600K CPU @ 3.40GHz",
+      "Intel(R) Core(TM) i7-2600K CPU @ 3.40GHz",
+      "Intel(R) Core(TM) i7-2600K CPU @ 3.40GHz",
+      "Intel(R) Core(TM) i7-2600K CPU @ 3.40GHz",
+      "Intel(R) Core(TM) i7-2600K CPU @ 3.40GHz",
+      "Intel(R) Core(TM) i7-2600K CPU @ 3.40GHz",
+      "Intel(R) Core(TM) i7-2600K CPU @ 3.40GHz",
+      "Intel(R) Core(TM) i7-2600K CPU @ 3.40GHz"
+    ],
+    "cpuCount": 8,
+    "memoryBytes": 16716103680,
+    "dbPoolMax": 20,
+    "kafkaPartitions": 12,
+    "payloadAmountMinor": 1,
+    "durability": {
+      "synchronousCommit": "on (not changed by benchmark)",
+      "fsync": "on (not changed by benchmark)",
+      "kafkaAcks": "all"
+    }
+  },
+  "summary": {
+    "requestsPerSecond": 240,
+    "throughputBytesPerSecond": 112326.4,
+    "p50Ms": 205,
+    "p99Ms": 323,
+    "errors": 0,
+    "timeouts": 0,
+    "non2xx": 0,
+    "durationSeconds": 10.02
+  },
+  "extra": {
+    "distributed": {
+      "requestsPerSecond": 559.1,
+      "p99Ms": 196,
+      "errors": 0,
+      "non2xx": 0
+    },
+    "hot": {
+      "requestsPerSecond": 240,
+      "p99Ms": 323,
+      "errors": 0,
+      "non2xx": 0
+    },
+    "balanceDiscrepancies": 0
+  },
+  "raw": {
+    "url": "http://localhost:3000",
+    "connections": 50,
+    "sampleInt": 1000,
+    "pipelining": 1,
+    "duration": 10.02,
+    "samples": 10,
+    "start": "2026-08-02T11:52:39.913Z",
+    "finish": "2026-08-02T11:52:49.934Z",
+    "errors": 0,
+    "timeouts": 0,
+    "mismatches": 0,
+    "non2xx": 0,
+    "resets": 0,
+    "1xx": 0,
+    "2xx": 2400,
+    "3xx": 0,
+    "4xx": 0,
+    "5xx": 0,
+    "statusCodeStats": {
+      "201": {
+        "count": 2400
+      }
+    },
+    "latency": {
+      "average": 206.01,
+      "mean": 206.01,
+      "stddev": 34.69,
+      "min": 44,
+      "max": 336,
+      "p0_001": 44,
+      "p0_01": 44,
+      "p0_1": 59,
+      "p1": 117,
+      "p2_5": 129,
+      "p10": 177,
+      "p25": 189,
+      "p50": 205,
+      "p75": 223,
+      "p90": 240,
+      "p97_5": 296,
+      "p99": 323,
+      "p99_9": 334,
+      "p99_99": 336,
+      "p99_999": 336,
+      "totalCount": 2400
+    },
+    "requests": {
+      "average": 240,
+      "mean": 240,
+      "stddev": 15.09,
+      "min": 209,
+      "max": 262,
+      "total": 2400,
+      "p0_001": 209,
+      "p0_01": 209,
+      "p0_1": 209,
+      "p1": 209,
+      "p2_5": 209,
+      "p10": 209,
+      "p25": 231,
+      "p50": 241,
+      "p75": 252,
+      "p90": 256,
+      "p97_5": 262,
+      "p99": 262,
+      "p99_9": 262,
+      "p99_99": 262,
+      "p99_999": 262,
+      "sent": 2450
+    },
+    "throughput": {
+      "average": 112326.4,
+      "mean": 112326.4,
+      "stddev": 7051.88,
+      "min": 97812,
+      "max": 122616,
+      "total": 1123200,
+      "p0_001": 97855,
+      "p0_01": 97855,
+      "p0_1": 97855,
+      "p1": 97855,
+      "p2_5": 97855,
+      "p10": 97855,
+      "p25": 108159,
+      "p50": 112831,
+      "p75": 117951,
+      "p90": 119871,
+      "p97_5": 122623,
+      "p99": 122623,
+      "p99_9": 122623,
+      "p99_99": 122623,
+      "p99_999": 122623
+    }
+  }
+}

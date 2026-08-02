@@ -1,0 +1,6 @@
+CODEX_PROMPT.md
+feature.md
+node_modules/
+dist/
+.env
+coverage/
