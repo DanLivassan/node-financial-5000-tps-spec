@@ -358,6 +358,19 @@ O teste padrão de uma única dupla de contas chegou a 906,7 TPS, p50 215 ms, p9
 
 O ganho é mensurado, mas **a implementação ainda não demonstrou 5.000 TPS**: o melhor cenário ficou 2,60× abaixo da meta. A queda de uniforme para Zipf/mixed mostra que lotes grandes não removem dependências por conta; próximos experimentos devem decompor duração do batch em triggers, WAL/commit e DML, e testar tamanho/janela/concorrência com p99 e fairness como restrições.
 
+#### Experimento com 16 lotes concorrentes
+
+Mantendo lote 32, janela 2 ms, pool 20, 200 conexões e toda a durabilidade, aumentar `TRANSACTION_BATCH_CONCURRENCY` de 4 para 16 produziu:
+
+| Distribuição | Concorrência 4 | Concorrência 16 | Variação | p95 com 16 | p99 com 16 |
+|---|---:|---:|---:|---:|---:|
+| Uniforme | 1.920,93 TPS | 2.055,47 TPS | +7,00% | 141,51 ms | 182,33 ms |
+| Zipf α=1,1 | 952,87 TPS | 766,53 TPS | -19,56% | 691,63 ms | 901,00 ms |
+| 80% uniforme / 20% hot | 965,11 TPS | 749,93 TPS | -22,30% | 396,56 ms | 530,33 ms |
+| 100% hot | 929,00 TPS | 760,66 TPS | -18,12% | 365,09 ms | 424,67 ms |
+
+O lote médio caiu de 31,86 para 13,66 comandos, a duração média subiu de 105,99 para 178,70 ms e a espera média na fila caiu de 55,12 para 3,14 ms. Dezesseis dispatchers drenam a fila cedo demais, fragmentam o batching e aumentam pressão/espera no PostgreSQL. Não houve erros, deadlocks, retries, rejeições ou divergências. O padrão permanece em concorrência 4; concorrência 16 melhora pouco o caso totalmente distribuído, aumenta sua variância e piora substancialmente cargas com skew. Artefato: `artifacts/load-tests/account-distribution-1000-2026-08-02T14-37-23.965Z.json`.
+
 Esses números **não demonstram 5.000 TPS** e não são capacidade produtiva. São uma linha de base reproduzível de uma única execução local. Os dois primeiros artefatos de Autocannon preservam execuções inválidas, marcadas pelo `load:report` como `INVALID`, que detectaram o body dinâmico mal configurado; eles não são resultados de throughput financeiro.
 
 ## Template do ambiente de benchmark
