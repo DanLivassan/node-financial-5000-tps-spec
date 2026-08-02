@@ -35,6 +35,15 @@ export const metrics = {
   pgPoolTotal: new Gauge({ name: "postgres_pool_total", help: "PostgreSQL pool clients", registers: [registry] }),
   pgPoolIdle: new Gauge({ name: "postgres_pool_idle", help: "PostgreSQL idle pool clients", registers: [registry] }),
   pgPoolWaiting: new Gauge({ name: "postgres_pool_waiting", help: "PostgreSQL pool waiters", registers: [registry] }),
+  transactionBatchSize: new Histogram({ name: "transaction_batch_size", help: "Financial commands per PostgreSQL batch",
+    buckets: [1,2,4,8,16,32,64,128], registers: [registry] }),
+  transactionBatchQueueWait: new Histogram({ name: "transaction_batch_queue_wait_seconds", help: "Time a financial command waits for dispatch",
+    buckets: [0.001,0.002,0.005,0.01,0.025,0.05,0.1,0.25,0.5,1], registers: [registry] }),
+  transactionBatchDuration: new Histogram({ name: "transaction_batch_duration_seconds", help: "PostgreSQL financial batch execution duration",
+    buckets: [0.001,0.003,0.005,0.01,0.025,0.05,0.1,0.25,0.5,1,2.5], registers: [registry] }),
+  transactionBatchActive: new Gauge({ name: "transaction_batch_active", help: "Financial batches executing", registers: [registry] }),
+  transactionBatchQueued: new Gauge({ name: "transaction_batch_queued", help: "Financial commands waiting for dispatch", registers: [registry] }),
+  transactionBatchRejected: counter("transaction_batch_rejected_total", "Financial commands rejected by queue backpressure"),
 };
 
 export async function updateDatabaseMetrics(db: pg.Pool): Promise<void> {

@@ -1,12 +1,24 @@
 import Fastify, { LogController } from "fastify";
 import type pg from "pg";
 import { ZodError } from "zod";
+import { config } from "../../../packages/config/src/index.js";
 import { transactionRequestSchema } from "../../../packages/contracts/src/transactions.js";
-import { DomainError, createFinancialTransaction } from "../../../packages/ledger/src/transaction-service.js";
+import { createFinancialTransactionBatch } from "../../../packages/ledger/src/transaction-batch-service.js";
+import { TransactionBatcher } from "../../../packages/ledger/src/transaction-batcher.js";
+import { DomainError } from "../../../packages/ledger/src/transaction-service.js";
 import { initializeDefaultMetrics, metrics, registry, updateDatabaseMetrics } from "../../../packages/observability/src/metrics.js";
 
 export function buildServer(db: pg.Pool) {
   initializeDefaultMetrics();
+  const transactionBatcher = new TransactionBatcher(
+    (commands) => createFinancialTransactionBatch(db, commands),
+    {
+      maxBatchSize: config.transactionBatchSize,
+      maxWaitMs: config.transactionBatchWindowMs,
+      maxConcurrentBatches: config.transactionBatchConcurrency,
+      maxQueueSize: config.transactionBatchQueueMax,
+    },
+  );
   const app = Fastify({ logger: process.env.NODE_ENV === "test" ? false : {
     level: process.env.LOG_LEVEL ?? "info", redact: ["req.headers.authorization", "req.headers.idempotency-key"],
   }, logController: new LogController({ disableRequestLogging: true }), bodyLimit: 16 * 1024 });
@@ -32,8 +44,8 @@ export function buildServer(db: pg.Pool) {
     const key = Array.isArray(keyHeader) ? keyHeader[0] : keyHeader;
     const payload = transactionRequestSchema.parse(request.body);
     const traceHeader = request.headers.traceparent;
-    const result = await createFinancialTransaction(db, key ?? "", payload,
-      typeof traceHeader === "string" ? { traceparent: traceHeader } : {});
+    const result = await transactionBatcher.submit(key ?? "", payload,
+      typeof traceHeader === "string" ? traceHeader : undefined);
     reply.header("Idempotency-Replayed", String(result.replayed));
     return reply.code(result.statusCode).send(result.body);
   });
@@ -47,5 +59,6 @@ export function buildServer(db: pg.Pool) {
     app.log.error(error);
     return reply.code(500).send({ error: "INTERNAL_ERROR" });
   });
+  app.addHook("onClose", async () => transactionBatcher.close());
   return app;
 }
